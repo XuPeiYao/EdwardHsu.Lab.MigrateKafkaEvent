@@ -1,8 +1,6 @@
 # EdwardHsu.Lab.MigrateKafkaEvent
 
-===
-
-# Hosts
+## Hosts
 
 Path: `C:\Windows\System32\drivers\etc\hosts`
 
