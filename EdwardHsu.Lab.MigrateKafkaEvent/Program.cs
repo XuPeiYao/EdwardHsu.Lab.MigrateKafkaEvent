@@ -47,11 +47,11 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
 
             bool loop = true;
 
-            void CheckEOF()
-            {
+            void CheckEOF(bool initCheck)
+            { 
                 var partitions = consumer.Committed(TimeSpan.FromSeconds(30));
 
-                if (partitions.Count == 0)
+                if (partitions.Count == 0 && initCheck)
                 {
                     return;
                 }
@@ -60,7 +60,7 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
                 {
                     var watermarkOffset = consumer.GetWatermarkOffsets(partition.TopicPartition);
 
-                    if (watermarkOffset.High.Value != partition.Offset)
+                    if (watermarkOffset.High.Value != partition.Offset && watermarkOffset.High != watermarkOffset.Low)
                     {
                         hasLag = true;
                         break;
@@ -74,7 +74,7 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
             }
             
             
-            CheckEOF();
+            CheckEOF(true);
             while (loop)
             {
                 try
@@ -84,7 +84,7 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
 
                     if (data.IsPartitionEOF)
                     {
-                        CheckEOF();
+                        CheckEOF(false);
                         if (!loop) break;
                     }
                     else
