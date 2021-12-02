@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "EdwardHsu.Lab.MigrateKafkaEvent": {
+      "commandName": "Project"
+    },
+    "Docker": {
+      "commandName": "Docker"
+    }
+  }
+}
