@@ -48,26 +48,27 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
             bool loop = true;
 
             void CheckEOF(bool initCheck)
-            { 
-                var partitions = consumer.Committed(TimeSpan.FromSeconds(30));
+            {
+                var partitions = metadata.Topics.Find(x=>x.Topic==eventTopic).Partitions.Select(x => new TopicPartition(eventTopic, x.PartitionId));
+                var partitionOffsets = consumer.Committed(partitions,TimeSpan.FromSeconds(30));
 
-                if (partitions.Count == 0 && initCheck)
+                if (partitionOffsets.Count == 0 && initCheck)
                 {
                     return;
                 }
                 bool hasLag = false;
-                foreach (var partition in partitions)
+                foreach (var partitionOffset in partitionOffsets)
                 {
-                    var watermarkOffset = consumer.GetWatermarkOffsets(partition.TopicPartition);
+                    var watermarkOffset = consumer.GetWatermarkOffsets(partitionOffset.TopicPartition);
 
-                    if (watermarkOffset.High.Value != partition.Offset && watermarkOffset.High != watermarkOffset.Low)
+                    if (watermarkOffset.High.Value != partitionOffset.Offset && watermarkOffset.High != watermarkOffset.Low)
                     {
                         hasLag = true;
                         break;
                     }
                     else
                     {
-                        Console.WriteLine($"EOF: ({partition.Partition.Value}) - Instance: {consumer.GetHashCode()}");
+                        Console.WriteLine($"EOF: ({partitionOffset.Partition.Value}) - Instance: {consumer.GetHashCode()}");
                     }
                 }
                 loop = hasLag;
