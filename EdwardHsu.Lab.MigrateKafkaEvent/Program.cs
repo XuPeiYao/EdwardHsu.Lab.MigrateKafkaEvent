@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Text;
@@ -16,6 +17,7 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
     {
         private const string eventTopic = "Test";
         private const string consumerGroup = "Test";
+        private const int numPartitions = 4;
         static async Task Main(string[] args)
         {
             await SendEvents();
@@ -27,16 +29,20 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
 
         static async Task ReceiveEvents()
         {
-            using var old1KafkaConsumer = InitConsumer("kafka1:9092");
-            using var old2KafkaConsumer = InitConsumer("kafka1:9092");
-            using var newKafkaConsumer  = InitConsumer("kafka2:9093");
+            List<Task> consumers = new List<Task>();
+            for (int i = 0; i < numPartitions; i++)
+            {
+                consumers.Add(Task.Run(
+                    async () =>
+                    {
+                        using var oldKafkaConsumer = InitConsumer("kafka1:9092");
+                        using var newKafkaConsumer = InitConsumer("kafka2:9093");
+                        await StartConsumeLoop("kafka1:9092", oldKafkaConsumer);
+                        await StartConsumeLoop("kafka2:9092", newKafkaConsumer);
+                    }));
+            }
 
-            var t1 = StartConsumeLoop("kafka1:9092",old1KafkaConsumer);
-            var t2 = StartConsumeLoop("kafka1:9092",old2KafkaConsumer);
-            await Task.WhenAll(t1, t2);
-
-            Console.WriteLine("-----");
-            await StartConsumeLoop("kafka2:9093", newKafkaConsumer);
+            await Task.WhenAll(consumers);
         }
 
 
@@ -129,7 +135,6 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
 
             for (int i = 1; i <= 20; i++)
             {
-                continue;
                 await oldKafkaProducer.ProduceAsync(
                     eventTopic,
                     CreateTestEvent(i).ToKafkaMessage(
@@ -158,7 +163,7 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
                 {
                     await adminClient.DeleteTopicsAsync(new string[]{eventTopic});
                     await adminClient.CreateTopicsAsync(new TopicSpecification[] {
-                        new TopicSpecification { Name = eventTopic, ReplicationFactor = 1, NumPartitions = 2 } });
+                        new TopicSpecification { Name = eventTopic, ReplicationFactor = 1, NumPartitions = numPartitions } });
                 }
                 catch (CreateTopicsException e)
                 {
