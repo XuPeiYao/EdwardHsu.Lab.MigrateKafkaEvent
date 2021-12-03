@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka;
 using CloudNative.CloudEvents;
@@ -30,15 +31,19 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
         static async Task ReceiveEvents()
         {
             List<Task> consumers = new List<Task>();
-            for (int i = 0; i < numPartitions; i++)
+            for (int i = 0; i < 2; i++)
             {
                 consumers.Add(Task.Run(
                     async () =>
                     {
                         using var oldKafkaConsumer = InitConsumer("kafka1:9092");
                         using var newKafkaConsumer = InitConsumer("kafka2:9093");
+                        Console.WriteLine("Start Consume Old Kafka");
                         await StartConsumeLoop("kafka1:9092", oldKafkaConsumer);
-                        await StartConsumeLoop("kafka2:9092", newKafkaConsumer);
+                        Console.WriteLine("End Consume Old Kafka");
+                        Console.WriteLine("Start Consume New Kafka");
+                        await StartConsumeLoop("kafka2:9093", newKafkaConsumer);
+                        Console.WriteLine("End Consume New Kafka");
                     }));
             }
 
@@ -55,33 +60,46 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
 
             void CheckEOF(bool initCheck)
             {
-                var partitions = metadata.Topics.Find(x=>x.Topic==eventTopic).Partitions.Select(x => new TopicPartition(eventTopic, x.PartitionId));
-                var partitionOffsets = consumer.Committed(partitions,TimeSpan.FromSeconds(30));
-
-                if (partitionOffsets.Count == 0 && initCheck)
+                try
                 {
-                    return;
-                }
-                bool hasLag = false;
-                foreach (var partitionOffset in partitionOffsets)
-                {
-                    var watermarkOffset = consumer.GetWatermarkOffsets(partitionOffset.TopicPartition);
+                    var partitions = metadata.Topics.Find(x => x.Topic == eventTopic).Partitions
+                                             .Select(x => new TopicPartition(eventTopic, x.PartitionId));
+                    var partitionOffsets = consumer.Committed(partitions, TimeSpan.FromSeconds(30));
 
-                    if (watermarkOffset.High.Value != partitionOffset.Offset && watermarkOffset.High != watermarkOffset.Low)
+                    if (partitionOffsets.Count == 0 && initCheck)
                     {
-                        hasLag = true;
-                        break;
+                        return;
                     }
-                    else
+
+                    bool hasLag = false;
+                    foreach (var partitionOffset in partitionOffsets)
                     {
-                        Console.WriteLine($"EOF: ({partitionOffset.Partition.Value}) - Instance: {consumer.GetHashCode()}");
+                        var watermarkOffset = consumer.GetWatermarkOffsets(partitionOffset.TopicPartition);
+
+                        if (watermarkOffset.High.Value != partitionOffset.Offset &&
+                            watermarkOffset.High != watermarkOffset.Low)
+                        {
+                            hasLag = true;
+                            break;
+                        }
+                        else
+                        {
+                            Console.WriteLine(
+                                $"EOF: ({partitionOffset.Partition.Value}) - Instance: {consumer.GetHashCode()}");
+                        }
                     }
+
+                    loop = hasLag;
                 }
-                loop = hasLag;
+                catch(Exception e)
+                {
+                    Console.WriteLine($"{e.ToString()}");
+                }
             }
             
             
-            CheckEOF(true);
+            //CheckEOF(true);
+            var random = new Random((int)DateTime.Now.Ticks);
             while (loop)
             {
                 try
@@ -96,7 +114,10 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
                     }
                     else
                     {
-                        Console.WriteLine($"Receive: ({data.Partition.Value}) {data.Message.ToCloudEvent(new JsonEventFormatter()).Data} - Instance: {consumer.GetHashCode()}");
+                        Console.WriteLine(
+                            $"Receive: ({data.Partition.Value}) {data.Message.ToCloudEvent(new JsonEventFormatter()).Data} - Instance: {consumer.GetHashCode()}");
+                        Thread.Sleep(random.Next(100, 1000));
+
                         consumer.Commit(data);
                     }
                 }
@@ -161,7 +182,11 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
             {
                 try
                 {
-                    await adminClient.DeleteTopicsAsync(new string[]{eventTopic});
+                    try
+                    {
+                        await adminClient.DeleteTopicsAsync(new string[] {eventTopic});
+                    }catch{}
+
                     await adminClient.CreateTopicsAsync(new TopicSpecification[] {
                         new TopicSpecification { Name = eventTopic, ReplicationFactor = 1, NumPartitions = numPartitions } });
                 }
