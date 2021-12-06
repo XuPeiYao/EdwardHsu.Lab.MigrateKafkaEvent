@@ -17,8 +17,7 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
     class Program
     {
         private const string eventTopic = "Test";
-        private const string consumerGroup = "Test";
-        private const int numPartitions = 4;
+        private const string consumerGroup = "Test"; 
         static async Task Main(string[] args)
         {
             await SendEvents();
@@ -36,14 +35,15 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
                 consumers.Add(Task.Run(
                     async () =>
                     {
+                        var       id               = Guid.NewGuid();
                         using var oldKafkaConsumer = InitConsumer("kafka1:9092");
                         using var newKafkaConsumer = InitConsumer("kafka2:9093");
-                        Console.WriteLine("Start Consume Old Kafka");
+                        Console.WriteLine($"Start Consume Old Kafka - {id}");
                         await StartConsumeLoop("kafka1:9092", oldKafkaConsumer);
-                        Console.WriteLine("End Consume Old Kafka");
-                        Console.WriteLine("Start Consume New Kafka");
+                        Console.WriteLine($"End Consume Old Kafka - {id}");
+                        Console.WriteLine($"Start Consume New Kafka - {id}");
                         await StartConsumeLoop("kafka2:9093", newKafkaConsumer);
-                        Console.WriteLine("End Consume New Kafka");
+                        Console.WriteLine($"End Consume New Kafka - {id}");
                     }));
             }
 
@@ -52,55 +52,10 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
 
 
         static async Task StartConsumeLoop(string server,IConsumer<string, byte[]> consumer)
-        {
-            var adminClient = await CreateAdminClient(server);
-            var metadata = adminClient.GetMetadata(TimeSpan.FromSeconds(5));
-
-            bool loop = true;
-
-            void CheckEOF(bool initCheck)
-            {
-                try
-                {
-                    var partitions = metadata.Topics.Find(x => x.Topic == eventTopic).Partitions
-                                             .Select(x => new TopicPartition(eventTopic, x.PartitionId));
-                    var partitionOffsets = consumer.Committed(partitions, TimeSpan.FromSeconds(30));
-
-                    if (partitionOffsets.Count == 0 && initCheck)
-                    {
-                        return;
-                    }
-
-                    bool hasLag = false;
-                    foreach (var partitionOffset in partitionOffsets)
-                    {
-                        var watermarkOffset = consumer.GetWatermarkOffsets(partitionOffset.TopicPartition);
-
-                        if (watermarkOffset.High.Value != partitionOffset.Offset &&
-                            watermarkOffset.High != watermarkOffset.Low)
-                        {
-                            hasLag = true;
-                            break;
-                        }
-                        else
-                        {
-                            Console.WriteLine(
-                                $"EOF: ({partitionOffset.Partition.Value}) - Instance: {consumer.GetHashCode()}");
-                        }
-                    }
-
-                    loop = hasLag;
-                }
-                catch(Exception e)
-                {
-                    Console.WriteLine($"{e.ToString()}");
-                }
-            }
-            
-            
-            //CheckEOF(true);
-            var random = new Random((int)DateTime.Now.Ticks);
-            while (loop)
+        { 
+            var progressBar = new Dictionary<int, bool>();
+            var random      = new Random((int)DateTime.Now.Ticks);
+            while (true)
             {
                 try
                 {
@@ -109,14 +64,28 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
 
                     if (data.IsPartitionEOF)
                     {
-                        CheckEOF(false);
-                        if (!loop) break;
+                        var addAssignments = consumer.Assignment.Where(x => !x.Partition.IsSpecial)
+                                                  .Select(x => x.Partition.Value)
+                                                  .Where(x=>!progressBar.ContainsKey(x)).ToArray();
+                        var removeAssignments = consumer.Assignment.Where(x => !x.Partition.IsSpecial)
+                                                     .Select(x => x.Partition.Value)
+                                                     .Where(x => !progressBar.ContainsKey(x)).ToArray();
+                        foreach (var pId in addAssignments)
+                        {
+                            progressBar[pId] = false;
+                        }
+                        foreach (var pId in removeAssignments)
+                        {
+                            progressBar.Remove(pId);
+                        }
+                        progressBar[data.Partition.Value] = true;
+                        if(progressBar.All(x=>x.Value))break;
                     }
                     else
                     {
                         Console.WriteLine(
                             $"Receive: ({data.Partition.Value}) {data.Message.ToCloudEvent(new JsonEventFormatter()).Data} - Instance: {consumer.GetHashCode()}");
-                        Thread.Sleep(random.Next(100, 1000));
+                        Thread.Sleep(random.Next(100, 500));
 
                         consumer.Commit(data);
                     }
@@ -151,10 +120,10 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
             using var oldKafkaProducer = InitProducer("kafka1:9092");
             using var newKafkaProducer = InitProducer("kafka2:9093");
 
-            await CreateTestTopic("kafka1:9092");
-            await CreateTestTopic("kafka2:9093");
+            await CreateTestTopic("kafka1:9092",4);
+            await CreateTestTopic("kafka2:9093",4);
 
-            for (int i = 1; i <= 20; i++)
+            for (int i = 1; i <= 30; i++)
             {
                 await oldKafkaProducer.ProduceAsync(
                     eventTopic,
@@ -162,7 +131,7 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
                         ContentMode.Structured, new JsonEventFormatter()));
             }
 
-            for (int i = 21; i <= 40; i++)
+            for (int i = 31; i <= 60; i++)
             {
                 await newKafkaProducer.ProduceAsync(
                     eventTopic,
@@ -176,7 +145,7 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
         {
             return new AdminClientBuilder(new AdminClientConfig {BootstrapServers = server}).Build();
         }
-        static async Task CreateTestTopic(string server)
+        static async Task CreateTestTopic(string server, int numPartitions = 4)
         {
             using (var adminClient = await CreateAdminClient(server))
             {
@@ -205,7 +174,7 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
             result.Id              = id.ToString();
             result.DataContentType = "application/json";
             result.Data            = $"{{\"id\": {id}}}";
-
+            result.SetPartitionKey(id.ToString());
             return result;
         }
 
@@ -215,7 +184,7 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
             {
                 BootstrapServers = server,
                 ClientId         = Dns.GetHostName(),
-                Partitioner      = Partitioner.Random
+                Partitioner      = Partitioner.Consistent
             };
 
             return new ProducerBuilder<string, byte[]>(config).Build();
