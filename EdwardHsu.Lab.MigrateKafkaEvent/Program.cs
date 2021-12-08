@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -12,6 +13,7 @@ using CloudNative.CloudEvents.Extensions;
 using CloudNative.CloudEvents.Kafka;
 using CloudNative.CloudEvents.SystemTextJson;
 using Confluent.Kafka.Admin;
+using Partitioner = Confluent.Kafka.Partitioner;
 
 namespace EdwardHsu.Lab.MigrateKafkaEvent
 {
@@ -33,6 +35,12 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
         static async Task ReceiveEvents()
         {
             List<Task> consumers = new List<Task>();
+
+
+            // 此處
+            var partitionStatus_Old = new ConcurrentDictionary<int, bool>();
+            var partitionStatus_New = new ConcurrentDictionary<int, bool>();
+
             for (int i = 0; i < 2; i++)
             {
                 string consumerName = "consumer"+ i.ToString();
@@ -44,10 +52,10 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
                         using var oldKafkaConsumer = InitConsumer("kafka1:9092");
                         using var newKafkaConsumer = InitConsumer("kafka2:9093");
                         Console.WriteLine($"Start Consume Old Kafka - {consumerName}");
-                        await StartConsumeLoop("kafka1:9092", oldKafkaConsumer, consumerName+"_OLD");
+                        await StartConsumeLoop("kafka1:9092", oldKafkaConsumer, consumerName+"_OLD", partitionStatus_Old);
                         Console.WriteLine($"End Consume Old Kafka - {id}");
                         Console.WriteLine($"Start Consume New Kafka - {consumerName}");
-                        await StartConsumeLoop("kafka2:9093", newKafkaConsumer, consumerName + "_NEW");
+                        await StartConsumeLoop("kafka2:9093", newKafkaConsumer, consumerName + "_NEW", partitionStatus_New);
                         Console.WriteLine($"End Consume New Kafka - {consumerName}");
                     }));
             }
@@ -56,11 +64,17 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
         }
 
 
-        static async Task StartConsumeLoop(string server, IConsumer<string, byte[]> consumer, string consumerName)
+        static async Task StartConsumeLoop(string server, IConsumer<string, byte[]> consumer, string consumerName, ConcurrentDictionary<int, bool> partitionStatus = null)
         {
-            // 此處
-            var partitionStatus = new Dictionary<int, bool>();
-            var random      = new Random((int)DateTime.Now.Ticks);
+            partitionStatus = partitionStatus ?? new ConcurrentDictionary<int, bool>();
+
+
+            var adminClient = await CreateAdminClient(server);
+            var topicMetadata = adminClient.GetMetadata(eventTopic, TimeSpan.FromSeconds(30)); 
+            var allPartitionIds = topicMetadata.Topics.Find(x => x.Topic == eventTopic).Partitions.Select(x => x.PartitionId);
+
+
+            var random = new Random((int)DateTime.Now.Ticks);
             
             while (true)
             {
@@ -104,6 +118,20 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
                 }
             } 
             consumer.Close();
+
+            Console.WriteLine($"{consumerName} Done");
+            // 等候所有Partition完成
+            while (true)
+            {
+                await Task.Delay(1000);
+                // 檢查所有partition是否已經都完成
+                if (allPartitionIds.Select(x => partitionStatus.ContainsKey(x) && partitionStatus[x]).All(x => x))
+                {
+                    // 若完成則跳出ConsumeLoop
+                    break;
+                }
+
+            }
         }
 
         static IConsumer<string, byte[]> InitConsumer(string server)
