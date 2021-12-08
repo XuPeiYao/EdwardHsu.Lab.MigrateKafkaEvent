@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka;
@@ -17,13 +18,15 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
     class Program
     {
         private const string eventTopic = "Test";
-        private const string consumerGroup = "Test"; 
+        private const string consumerGroup = "Test";
+        static int count = 0;
         static async Task Main(string[] args)
         {
             await SendEvents();
             Console.WriteLine("SendEvents OK!");
             await ReceiveEvents();
             Console.WriteLine("ReceiveEvents OK!");
+            Console.WriteLine(count.ToString());
         }
 
 
@@ -32,18 +35,20 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
             List<Task> consumers = new List<Task>();
             for (int i = 0; i < 2; i++)
             {
+                string consumerName = "consumer"+ i.ToString();
+                // 這裡每個Task代表一個獨立的Consumer的Job instance
                 consumers.Add(Task.Run(
                     async () =>
                     {
                         var       id               = Guid.NewGuid();
                         using var oldKafkaConsumer = InitConsumer("kafka1:9092");
                         using var newKafkaConsumer = InitConsumer("kafka2:9093");
-                        Console.WriteLine($"Start Consume Old Kafka - {id}");
-                        await StartConsumeLoop("kafka1:9092", oldKafkaConsumer);
+                        Console.WriteLine($"Start Consume Old Kafka - {consumerName}");
+                        await StartConsumeLoop("kafka1:9092", oldKafkaConsumer, consumerName+"_OLD");
                         Console.WriteLine($"End Consume Old Kafka - {id}");
-                        Console.WriteLine($"Start Consume New Kafka - {id}");
-                        await StartConsumeLoop("kafka2:9093", newKafkaConsumer);
-                        Console.WriteLine($"End Consume New Kafka - {id}");
+                        Console.WriteLine($"Start Consume New Kafka - {consumerName}");
+                        await StartConsumeLoop("kafka2:9093", newKafkaConsumer, consumerName + "_NEW");
+                        Console.WriteLine($"End Consume New Kafka - {consumerName}");
                     }));
             }
 
@@ -51,10 +56,12 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
         }
 
 
-        static async Task StartConsumeLoop(string server,IConsumer<string, byte[]> consumer)
-        { 
-            var progressBar = new Dictionary<int, bool>();
+        static async Task StartConsumeLoop(string server, IConsumer<string, byte[]> consumer, string consumerName)
+        {
+            // 此處
+            var partitionStatus = new Dictionary<int, bool>();
             var random      = new Random((int)DateTime.Now.Ticks);
+            
             while (true)
             {
                 try
@@ -64,37 +71,39 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
 
                     if (data.IsPartitionEOF)
                     {
-                        var addAssignments = consumer.Assignment.Where(x => !x.Partition.IsSpecial)
-                                                  .Select(x => x.Partition.Value)
-                                                  .Where(x=>!progressBar.ContainsKey(x)).ToArray();
-                        var removeAssignments = consumer.Assignment.Where(x => !x.Partition.IsSpecial)
-                                                     .Select(x => x.Partition.Value)
-                                                     .Where(x => !progressBar.ContainsKey(x)).ToArray();
-                        foreach (var pId in addAssignments)
+                        Console.WriteLine($"{consumerName} Assignment:" + string.Join(",", consumer.Assignment.Select(x => x.Partition.Value)));
+
+                        var partitionIds = consumer.Assignment.Where(x => !x.Partition.IsSpecial)
+                                                   .Select(x => x.Partition.Value);
+                       
+                        partitionStatus[data.Partition.Value] = true; //將收到EOF的partition狀態設為已完成
+
+                        // 檢查目前Consumer被分配到的partition是否已經都完成
+                        if (partitionIds.Select(x => partitionStatus.ContainsKey(x) && partitionStatus[x]).All(x=>x))
                         {
-                            progressBar[pId] = false;
+                            // 若完成則跳出ConsumeLoop
+                            break;
                         }
-                        foreach (var pId in removeAssignments)
-                        {
-                            progressBar.Remove(pId);
-                        }
-                        progressBar[data.Partition.Value] = true;
-                        if(progressBar.All(x=>x.Value))break;
                     }
                     else
                     {
+                        var cloudeventData = data.Message.ToCloudEvent(new JsonEventFormatter()).Data.ToString();
                         Console.WriteLine(
-                            $"Receive: ({data.Partition.Value}) {data.Message.ToCloudEvent(new JsonEventFormatter()).Data} - Instance: {consumer.GetHashCode()}");
-                        Thread.Sleep(random.Next(100, 500));
-
+                            $"Receive: ({data.Partition.Value}) {cloudeventData} - Instance: {consumerName}");
                         consumer.Commit(data);
+                        Thread.Sleep(random.Next(100,500));
+                        lock (eventTopic)
+                        {
+                            count++;
+                        }
                     }
                 }
                 catch(Exception e)
                 {
-                    Console.WriteLine($"Consume Error: {e.ToString()}");
+                    Console.WriteLine($"Consume Error: {e.ToString()} - Instance: {consumerName}");
                 }
-            }
+            } 
+            consumer.Close();
         }
 
         static IConsumer<string, byte[]> InitConsumer(string server)
@@ -105,11 +114,12 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
                 GroupId          = consumerGroup,
                 AutoOffsetReset  = AutoOffsetReset.Earliest,
                 EnableAutoCommit = false,
-                EnablePartitionEof = true
+                EnablePartitionEof = true // 這個屬性一定要打開
             };
 
             var consumer = new ConsumerBuilder<string, byte[]>(config).Build();
             consumer.Subscribe(eventTopic);
+            
             return consumer;
         }
 
@@ -167,13 +177,13 @@ namespace EdwardHsu.Lab.MigrateKafkaEvent
         }
 
         static CloudEvent CreateTestEvent(int id)
-        {
+        { 
             var result = new CloudEvent();
             result.Source          = new Uri("https://edward-hsu.net/events/test");
             result.Type            = "testEvent";
             result.Id              = id.ToString();
             result.DataContentType = "application/json";
-            result.Data            = $"{{\"id\": {id}}}";
+            result.Data            = $"{{\"id\":{id}, \"type\":\"{(id<=30?"舊":"新")}\"}}";
             result.SetPartitionKey(id.ToString());
             return result;
         }
